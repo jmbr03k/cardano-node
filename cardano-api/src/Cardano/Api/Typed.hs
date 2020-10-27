@@ -1,5 +1,4 @@
 {-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -21,6 +20,7 @@
 -- not export any from this API. We also use them unticked as nature intended.
 {-# LANGUAGE DataKinds #-}
 {-# OPTIONS_GHC -Wno-unticked-promoted-constructors #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | This module provides a library interface for interacting with Cardano as
 -- a user of the system.
@@ -36,6 +36,9 @@ module Cardano.Api.Typed (
     -- * Eras
     Byron,
     Shelley,
+    Allegra,
+    Mary,
+
     HasTypeProxy(..),
     AsType(..),
     -- * Cryptographic key interface
@@ -163,20 +166,31 @@ module Cardano.Api.Typed (
     -- | Both 'PaymentCredential's and 'StakeCredential's can use scripts.
     -- Shelley supports multi-signatures via scripts.
     Script(..),
-    parseScript,
+    parseScriptShelley,
+    parseScriptAllegra,
+    parseScriptMary,
     parseScriptAny,
     parseScriptAll,
     parseScriptAtLeast,
     parseScriptSig,
+    parseScriptBefore,
+    parseScriptAfter,
 
     -- ** Script addresses
     -- | Making addresses from scripts.
-    scriptHash,
+    scriptHashShelley,
+    scriptHashAllegra,
+    scriptHashMary,
 
-    -- ** Multi-signature scripts
+    -- ** Multi signature scripts
     -- | Making multi-signature scripts.
     MultiSigScript(..),
-    makeMultiSigScript,
+    ScriptFeatureInEra(..),
+    SignatureFeature,
+    TimeLocksFeature,
+    makeMultiSigScriptShelley,
+    makeMultiSigScriptAllegra,
+    makeMultiSigScriptMary,
 
     -- * Serialisation
     -- | Support for serialising data in JSON, CBOR and text files.
@@ -345,14 +359,12 @@ module Cardano.Api.Typed (
 import           Prelude
 
 import           Cardano.Prelude (decodeEitherBase16)
-import           Data.Aeson.Encode.Pretty (encodePretty')
 import           Data.Bifunctor (first)
-import           Data.Kind (Constraint, Type)
+import           Data.Kind (Type)
 import qualified Data.List as List
 import qualified Data.List.NonEmpty as NonEmpty
 import           Data.Maybe
 import           Data.Proxy (Proxy (..))
-import           Data.Scientific (toBoundedInteger)
 import           Data.String (IsString (fromString))
 import           Data.Text (Text)
 import qualified Data.Text as Text
@@ -368,7 +380,6 @@ import qualified Network.URI as URI
 
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Base16 as Base16
 import qualified Data.ByteString.Base58 as Base58
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
@@ -380,7 +391,6 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Sequence.Strict as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Vector (Vector)
 import qualified Data.Vector as Vector
 
 import qualified Codec.Binary.Bech32 as Bech32
@@ -389,12 +399,9 @@ import           Control.Applicative
 import           Control.Monad
 --import Control.Monad.IO.Class
 import           Control.Concurrent.STM
-import           Control.Exception (Exception (..), IOException, throwIO)
-import           Control.Monad.Trans.Except (ExceptT (..))
-import           Control.Monad.Trans.Except.Extra
 import           Control.Tracer (nullTracer)
 
-import           Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object, (.:), (.=))
+import           Data.Aeson (FromJSON (..), ToJSON (..), (.:))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 
@@ -495,7 +502,11 @@ import           Shelley.Spec.Ledger.TxBody (MIRPot (..))
 -- TODO: replace the above with
 --import qualified Cardano.Api.Byron   as Byron
 --import qualified Cardano.Api.Shelley as Shelley
-
+import           Cardano.Api.Eras
+import           Cardano.Api.HasTypeProxy
+import           Cardano.Api.Key
+import           Cardano.Api.MultiSig
+import           Cardano.Api.Serialisation
 --
 -- Other config and common types
 --
@@ -503,7 +514,6 @@ import           Cardano.Api.Protocol.Byron (mkNodeClientProtocolByron)
 import           Cardano.Api.Protocol.Cardano (mkNodeClientProtocolCardano)
 import           Cardano.Api.Protocol.Shelley (mkNodeClientProtocolShelley)
 import qualified Cardano.Api.Shelley.Serialisation.Legacy as Legacy
-import qualified Cardano.Api.TextView as TextView
 
 import           Ouroboros.Network.Protocol.ChainSync.Client as ChainSync
 import           Ouroboros.Network.Protocol.LocalStateQuery.Client as StateQuery
@@ -512,26 +522,7 @@ import           Ouroboros.Network.Protocol.LocalTxSubmission.Client as TxSubmis
 
 {- HLINT ignore "Redundant flip" -}
 
--- ----------------------------------------------------------------------------
--- Cardano eras, sometimes we have to distinguish them
---
 
--- | A type used as a tag to distinguish the Byron era.
-data Byron
-
--- | A type used as a tag to distinguish the Shelley era.
-data Shelley
-
-
-class HasTypeProxy t where
-  -- | A family of singleton types used in this API to indicate which type to
-  -- use where it would otherwise be ambiguous or merely unclear.
-  --
-  -- Values of this type are passed to
-  --
-  data AsType t
-
-  proxyToAsType :: Proxy t -> AsType t
 
 
 -- ----------------------------------------------------------------------------
@@ -607,8 +598,6 @@ class CastSigningKeyRole keyroleA keyroleB where
     castSigningKey :: SigningKey keyroleA -> SigningKey keyroleB
 
 
-data family Hash keyrole :: Type
-
 class CastHash keyroleA keyroleB where
 
     castHash :: Hash keyroleA -> Hash keyroleB
@@ -657,12 +646,12 @@ data NetworkId
 
 data PaymentCredential
        = PaymentCredentialByKey    (Hash PaymentKey)
-       | PaymentCredentialByScript (Hash Script)
+       | PaymentCredentialByScript (Hash (Script Shelley))
   deriving (Eq, Show)
 
 data StakeCredential
        = StakeCredentialByKey    (Hash StakeKey)
-       | StakeCredentialByScript (Hash Script)
+       | StakeCredentialByScript (Hash (Script Shelley))
   deriving (Eq, Show)
 
 data StakeAddressReference
@@ -852,14 +841,14 @@ toShelleyPaymentCredential :: PaymentCredential
                            -> Shelley.PaymentCredential StandardShelley
 toShelleyPaymentCredential (PaymentCredentialByKey (PaymentKeyHash kh)) =
     Shelley.KeyHashObj kh
-toShelleyPaymentCredential (PaymentCredentialByScript (ScriptHash sh)) =
+toShelleyPaymentCredential (PaymentCredentialByScript (ScriptHashShelley sh)) =
     Shelley.ScriptHashObj sh
 
 toShelleyStakeCredential :: StakeCredential
                          -> Shelley.StakeCredential StandardShelley
 toShelleyStakeCredential (StakeCredentialByKey (StakeKeyHash kh)) =
     Shelley.KeyHashObj kh
-toShelleyStakeCredential (StakeCredentialByScript (ScriptHash kh)) =
+toShelleyStakeCredential (StakeCredentialByScript (ScriptHashShelley kh)) =
     Shelley.ScriptHashObj kh
 
 toShelleyStakeReference :: StakeAddressReference
@@ -1257,6 +1246,8 @@ instance HasTextEnvelope (Witness Byron) where
 instance HasTextEnvelope (Witness Shelley) where
     textEnvelopeType _ = "TxWitnessShelley"
 
+makeShelleyScriptWitness :: Script Shelley -> Witness Shelley
+makeShelleyScriptWitness (ShelleyScript s) = ShelleyScriptWitness s
 
 getTxBody :: Tx era -> TxBody era
 getTxBody (ByronTx Byron.ATxAux { Byron.aTaTx = txbody }) =
@@ -1640,155 +1631,6 @@ estimateTransactionFee nw txFeeFixed txFeePerByte (ShelleyTx tx) =
                       Byron.aaVKDerivationPath = Nothing,
                       Byron.aaNetworkMagic     = toByronNetworkMagic nw
                     }
-
-
--- ----------------------------------------------------------------------------
--- Scripts
---
-
-newtype Script = Script (Shelley.Script StandardShelley)
-  deriving stock (Eq, Ord, Show)
-  deriving newtype (ToCBOR)
-
-newtype instance Hash Script = ScriptHash (Shelley.ScriptHash StandardShelley)
-  deriving (Eq, Ord, Show)
-
-data MultiSigScript = RequireSignature (Hash PaymentKey)
-                    | RequireAllOf [MultiSigScript]
-                    | RequireAnyOf [MultiSigScript]
-                    | RequireMOf Int [MultiSigScript]
-  deriving (Eq, Show)
-
-instance ToJSON MultiSigScript where
-  toJSON (RequireSignature pKeyHash) =
-    object [ "keyHash" .= String (Text.decodeUtf8 . serialiseToRawBytesHex $ pKeyHash)
-           , "type" .= String "sig"
-           ]
-  toJSON (RequireAnyOf reqScripts) =
-    object [ "type" .= String "any", "scripts" .= map toJSON reqScripts ]
-  toJSON (RequireAllOf reqScripts) =
-    object [ "type" .= String "all", "scripts" .= map toJSON reqScripts ]
-  toJSON (RequireMOf reqNum reqScripts) =
-    object [ "type" .= String "atLeast"
-           , "required" .= reqNum
-           , "scripts" .= map toJSON reqScripts
-           ]
-
-instance FromJSON MultiSigScript where
-  parseJSON = parseScript
-
-parseScript :: Value -> Aeson.Parser MultiSigScript
-parseScript v = parseScriptSig v
-                  <|> parseScriptAny v
-                  <|> parseScriptAll v
-                  <|> parseScriptAtLeast v
-
-parseScriptAny :: Value -> Aeson.Parser MultiSigScript
-parseScriptAny = Aeson.withObject "any" $ \obj -> do
-  t <- obj .: "type"
-  case t :: Text of
-    "any" -> do s <- obj .: "scripts"
-                RequireAnyOf <$> gatherMultiSigScripts s
-    _ -> fail "\"any\" multi-signature script value not found"
-
-parseScriptAll :: Value -> Aeson.Parser MultiSigScript
-parseScriptAll = Aeson.withObject "all" $ \obj -> do
-  t <- obj .: "type"
-  case t :: Text of
-    "all" -> do s <- obj .: "scripts"
-                RequireAllOf <$> gatherMultiSigScripts s
-    _ -> fail "\"all\" multi-signature script value not found"
-
-parseScriptAtLeast :: Value -> Aeson.Parser MultiSigScript
-parseScriptAtLeast = Aeson.withObject "atLeast" $ \obj -> do
-  v <- obj .: "type"
-  case v :: Text of
-    "atLeast" -> do
-      r <- obj .: "required"
-      s <- obj .: "scripts"
-      case r of
-        Number sci ->
-          case toBoundedInteger sci of
-            Just reqInt ->
-              do msigscripts <- gatherMultiSigScripts s
-                 let numScripts = length msigscripts
-                 when
-                   (reqInt > numScripts)
-                   (fail $ "Required number of script signatures exceeds the number of scripts."
-                         <> " Required number: " <> show reqInt
-                         <> " Number of scripts: " <> show numScripts)
-                 return $ RequireMOf reqInt msigscripts
-            Nothing -> fail $ "Error in multi-signature \"required\" key: "
-                            <> show sci <> " is not a valid Int"
-        _ -> fail "\"required\" value should be an integer"
-    _        -> fail "\"atLeast\" multi-signature script value not found"
-
-parseScriptSig :: Value -> Aeson.Parser MultiSigScript
-parseScriptSig = Aeson.withObject "sig" $ \obj -> do
-  v <- obj .: "type"
-  case v :: Text of
-    "sig" -> do k <- obj .: "keyHash"
-                RequireSignature <$> convertToHash k
-    _     -> fail "\"sig\" multi-signature script value not found"
-
-convertToHash :: Text -> Aeson.Parser (Hash PaymentKey)
-convertToHash txt = case deserialiseFromRawBytesHex (AsHash AsPaymentKey) $ Text.encodeUtf8 txt of
-                      Just payKeyHash -> return payKeyHash
-                      Nothing -> fail $ "Error deserialising payment key hash: " <> Text.unpack txt
-
-gatherMultiSigScripts :: Vector Value -> Aeson.Parser [MultiSigScript]
-gatherMultiSigScripts vs = sequence . Vector.toList $ Vector.map parseScript vs
-
-instance HasTypeProxy Script where
-    data AsType Script = AsScript
-    proxyToAsType _ = AsScript
-
-instance SerialiseAsRawBytes (Hash Script) where
-    serialiseToRawBytes (ScriptHash (Shelley.ScriptHash h)) =
-      Crypto.hashToBytes h
-
-    deserialiseFromRawBytes (AsHash AsScript) bs =
-      ScriptHash . Shelley.ScriptHash <$> Crypto.hashFromBytes bs
-
-instance SerialiseAsCBOR Script where
-    serialiseToCBOR (Script s) =
-      -- We use 'WrappedMultiSig' here to support the legacy binary
-      -- serialisation format for the @Script@ type from
-      -- @cardano-ledger-specs@.
-      --
-      -- See the documentation of 'WrappedMultiSig' for more information.
-      CBOR.serialize' (Legacy.WrappedMultiSig s)
-
-    deserialiseFromCBOR AsScript bs =
-      -- We use 'WrappedMultiSig' here to support the legacy binary
-      -- serialisation format for the @Script@ type from
-      -- @cardano-ledger-specs@.
-      --
-      -- See the documentation of 'WrappedMultiSig' for more information.
-      Script . Legacy.unWrappedMultiSig <$>
-        CBOR.decodeAnnotator "Script" fromCBOR (LBS.fromStrict bs)
-
-instance HasTextEnvelope Script where
-    textEnvelopeType _ = "Script"
-    textEnvelopeDefaultDescr (Script _) = "Multi-signature script"
-
-
-scriptHash :: Script -> Hash Script
-scriptHash (Script s) = ScriptHash (Shelley.hashMultiSigScript s)
-
-makeMultiSigScript :: MultiSigScript -> Script
-makeMultiSigScript = Script . go
-  where
-    go :: MultiSigScript -> Shelley.MultiSig StandardShelley
-    go (RequireSignature (PaymentKeyHash kh))
-                        = Shelley.RequireSignature (Shelley.coerceKeyRole kh)
-    go (RequireAllOf s) = Shelley.RequireAllOf (map go s)
-    go (RequireAnyOf s) = Shelley.RequireAnyOf (map go s)
-    go (RequireMOf m s) = Shelley.RequireMOf m (map go s)
-
-makeShelleyScriptWitness :: Script -> Witness Shelley
-makeShelleyScriptWitness (Script s) = ShelleyScriptWitness s
-
 
 -- ----------------------------------------------------------------------------
 -- Certificates embedded in transactions
@@ -2813,25 +2655,6 @@ submitTxToNodeLocal connctInfo tx = do
         atomically $ putTMVar resultVar result
         pure (TxSubmission.SendMsgDone ())
 
-
--- ----------------------------------------------------------------------------
--- CBOR serialisation
---
-
-class HasTypeProxy a => SerialiseAsCBOR a where
-    serialiseToCBOR :: a -> ByteString
-    deserialiseFromCBOR :: AsType a -> ByteString -> Either CBOR.DecoderError a
-
-    default serialiseToCBOR :: ToCBOR a => a -> ByteString
-    serialiseToCBOR = CBOR.serialize'
-
-    default deserialiseFromCBOR :: FromCBOR a
-                                => AsType a
-                                -> ByteString
-                                -> Either CBOR.DecoderError a
-    deserialiseFromCBOR _proxy = CBOR.decodeFull'
-
-
 -- ----------------------------------------------------------------------------
 -- JSON serialisation
 --
@@ -2847,26 +2670,6 @@ deserialiseFromJSON :: FromJSON a
                     -> Either JsonDecodeError a
 deserialiseFromJSON _proxy = either (Left . JsonDecodeError) Right
                            . Aeson.eitherDecodeStrict'
-
-
--- ----------------------------------------------------------------------------
--- Raw binary serialisation
---
-
-class HasTypeProxy a => SerialiseAsRawBytes a where
-
-  serialiseToRawBytes :: a -> ByteString
-
-  deserialiseFromRawBytes :: AsType a -> ByteString -> Maybe a
-
-serialiseToRawBytesHex :: SerialiseAsRawBytes a => a -> ByteString
-serialiseToRawBytesHex = Base16.encode . serialiseToRawBytes
-
-deserialiseFromRawBytesHex :: SerialiseAsRawBytes a
-                           => AsType a -> ByteString -> Maybe a
-deserialiseFromRawBytesHex proxy hex = case decodeEitherBase16 hex of
-  Right raw -> deserialiseFromRawBytes proxy raw
-  Left _ -> Nothing
 
 -- | For use with @deriving via@, to provide 'Show' and\/or 'IsString' instances
 -- using a hex encoding, based on the 'SerialiseAsRawBytes' instance.
@@ -3047,161 +2850,6 @@ class HasTypeProxy addr => SerialiseAddress addr where
     deserialiseAddress :: AsType addr -> Text -> Maybe addr
     -- TODO: consider adding data AddressDecodeError
 
-
--- ----------------------------------------------------------------------------
--- TextEnvelope Serialisation
---
-
-type TextEnvelope = TextView.TextView
-type TextEnvelopeType = TextView.TextViewType
-type TextEnvelopeDescr = TextView.TextViewDescription
-
-class SerialiseAsCBOR a => HasTextEnvelope a where
-    textEnvelopeType :: AsType a -> TextEnvelopeType
-
-    textEnvelopeDefaultDescr :: a -> TextEnvelopeDescr
-    textEnvelopeDefaultDescr _ = ""
-
-type TextEnvelopeError = TextView.TextViewError
-
-data FileError e = FileError   FilePath e
-                 | FileIOError FilePath IOException
-  deriving Show
-
-instance Error e => Error (FileError e) where
-  displayError (FileIOError path ioe) =
-    path ++ ": " ++ displayException ioe
-  displayError (FileError path e) =
-    path ++ ": " ++ displayError e
-
-instance Error TextView.TextViewError where
-  displayError = Text.unpack . TextView.renderTextViewError
-
-serialiseToTextEnvelope :: forall a. HasTextEnvelope a
-                        => Maybe TextEnvelopeDescr -> a -> TextEnvelope
-serialiseToTextEnvelope mbDescr a =
-    TextView.TextView {
-      TextView.tvType    = textEnvelopeType ttoken
-    , TextView.tvDescription   = fromMaybe (textEnvelopeDefaultDescr a) mbDescr
-    , TextView.tvRawCBOR = serialiseToCBOR a
-    }
-  where
-    ttoken :: AsType a
-    ttoken = proxyToAsType Proxy
-
-
-deserialiseFromTextEnvelope :: HasTextEnvelope a
-                            => AsType a
-                            -> TextEnvelope
-                            -> Either TextEnvelopeError a
-deserialiseFromTextEnvelope ttoken te = do
-    TextView.expectTextViewOfType (textEnvelopeType ttoken) te
-    first TextView.TextViewDecodeError $
-      deserialiseFromCBOR ttoken (TextView.tvRawCBOR te) --TODO: You have switched from CBOR to JSON
-
-data FromSomeType (c :: Type -> Constraint) b where
-     FromSomeType :: c a => AsType a -> (a -> b) -> FromSomeType c b
-
-
-deserialiseFromTextEnvelopeAnyOf :: [FromSomeType HasTextEnvelope b]
-                                 -> TextEnvelope
-                                 -> Either TextEnvelopeError b
-deserialiseFromTextEnvelopeAnyOf types te =
-    case List.find matching types of
-      Nothing ->
-        Left (TextView.TextViewTypeError expectedTypes actualType)
-
-      Just (FromSomeType ttoken f) ->
-        first TextView.TextViewDecodeError $
-          f <$> deserialiseFromCBOR ttoken (TextView.tvRawCBOR te)
-  where
-    actualType    = TextView.tvType te
-    expectedTypes = [ textEnvelopeType ttoken
-                    | FromSomeType ttoken _f <- types ]
-
-    matching (FromSomeType ttoken _f) = actualType == textEnvelopeType ttoken
-
-
-writeFileTextEnvelope :: HasTextEnvelope a
-                      => FilePath
-                      -> Maybe TextEnvelopeDescr
-                      -> a
-                      -> IO (Either (FileError ()) ())
-writeFileTextEnvelope path mbDescr a =
-    runExceptT $ do
-      handleIOExceptT (FileIOError path) $ BS.writeFile path content
-  where
-    content = LBS.toStrict $ encodePretty' TextView.textViewJSONConfig (serialiseToTextEnvelope mbDescr a) <> "\n"
-
-readFileTextEnvelope :: HasTextEnvelope a
-                     => AsType a
-                     -> FilePath
-                     -> IO (Either (FileError TextEnvelopeError) a)
-readFileTextEnvelope ttoken path =
-    runExceptT $ do
-      content <- handleIOExceptT (FileIOError path) $ BS.readFile path
-      firstExceptT (FileError path) $ hoistEither $ do
-        te <- first TextView.TextViewAesonDecodeError $ Aeson.eitherDecodeStrict' content
-        deserialiseFromTextEnvelope ttoken te
-
-
-readFileTextEnvelopeAnyOf :: [FromSomeType HasTextEnvelope b]
-                          -> FilePath
-                          -> IO (Either (FileError TextEnvelopeError) b)
-readFileTextEnvelopeAnyOf types path =
-    runExceptT $ do
-      content <- handleIOExceptT (FileIOError path) $ BS.readFile path
-      firstExceptT (FileError path) $ hoistEither $ do
-        te <- first TextView.TextViewAesonDecodeError $ Aeson.eitherDecodeStrict' content
-        deserialiseFromTextEnvelopeAnyOf types te
-
-readTextEnvelopeFromFile :: FilePath
-                         -> IO (Either (FileError TextEnvelopeError) TextEnvelope)
-readTextEnvelopeFromFile path =
-  runExceptT $ do
-    bs <- handleIOExceptT (FileIOError path) $
-            BS.readFile path
-    firstExceptT (FileError path . TextView.TextViewAesonDecodeError)
-      . hoistEither $ Aeson.eitherDecodeStrict' bs
-
-readTextEnvelopeOfTypeFromFile
-  :: TextEnvelopeType
-  -> FilePath
-  -> IO (Either (FileError TextEnvelopeError) TextEnvelope)
-readTextEnvelopeOfTypeFromFile expectedType path =
-  runExceptT $ do
-    te <- ExceptT (readTextEnvelopeFromFile path)
-    firstExceptT (FileError path) $ hoistEither $
-      TextView.expectTextViewOfType expectedType te
-    return te
-
-
--- ----------------------------------------------------------------------------
--- Error reporting
---
-
-class Show e => Error e where
-
-    displayError :: e -> String
-
-instance Error () where
-    displayError () = ""
-
--- | The preferred approach is to use 'Except' or 'ExceptT', but you can if
--- necessary use IO exceptions.
---
-throwErrorAsException :: Error e => e -> IO a
-throwErrorAsException e = throwIO (ErrorAsException e)
-
-data ErrorAsException where
-     ErrorAsException :: Error e => e -> ErrorAsException
-
-instance Show ErrorAsException where
-    show (ErrorAsException e) = show e
-
-instance Exception ErrorAsException where
-    displayException (ErrorAsException e) = displayError e
-
 -- ----------------------------------------------------------------------------
 -- Key instances
 --
@@ -3214,21 +2862,8 @@ instance HasTypeProxy a => HasTypeProxy (SigningKey a) where
     data AsType (SigningKey a) = AsSigningKey (AsType a)
     proxyToAsType _ = AsSigningKey (proxyToAsType (Proxy :: Proxy a))
 
-instance HasTypeProxy a => HasTypeProxy (Hash a) where
-    data AsType (Hash a) = AsHash (AsType a)
-    proxyToAsType _ = AsHash (proxyToAsType (Proxy :: Proxy a))
 
--- | Map the various Shelley key role types into corresponding 'Shelley.KeyRole'
--- types.
---
-type family ShelleyKeyRole (keyrole :: Type) :: Shelley.KeyRole
 
-type instance ShelleyKeyRole PaymentKey         = Shelley.Payment
-type instance ShelleyKeyRole GenesisKey         = Shelley.Genesis
-type instance ShelleyKeyRole GenesisUTxOKey     = Shelley.Payment
-type instance ShelleyKeyRole GenesisDelegateKey = Shelley.GenesisDelegate
-type instance ShelleyKeyRole StakeKey           = Shelley.Staking
-type instance ShelleyKeyRole StakePoolKey       = Shelley.StakePool
 
 
 --
@@ -3345,11 +2980,6 @@ instance CastVerificationKeyRole ByronKey PaymentKey where
 --
 -- This is a type level tag, used with other interfaces like 'Key'.
 --
-data PaymentKey
-
-instance HasTypeProxy PaymentKey where
-    data AsType PaymentKey = AsPaymentKey
-    proxyToAsType _ = AsPaymentKey
 
 instance Key PaymentKey where
 
@@ -3408,17 +3038,6 @@ instance SerialiseAsBech32 (SigningKey PaymentKey) where
     bech32PrefixFor         _ =  "addr_sk"
     bech32PrefixesPermitted _ = ["addr_sk"]
 
-newtype instance Hash PaymentKey =
-    PaymentKeyHash (Shelley.KeyHash Shelley.Payment StandardCrypto)
-  deriving (Eq, Ord, Show)
-
-instance SerialiseAsRawBytes (Hash PaymentKey) where
-    serialiseToRawBytes (PaymentKeyHash (Shelley.KeyHash vkh)) =
-      Crypto.hashToBytes vkh
-
-    deserialiseFromRawBytes (AsHash AsPaymentKey) bs =
-      PaymentKeyHash . Shelley.KeyHash <$> Crypto.hashFromBytes bs
-
 instance HasTextEnvelope (VerificationKey PaymentKey) where
     textEnvelopeType _ = "PaymentVerificationKeyShelley_"
                       <> fromString (Crypto.algorithmNameDSIGN proxy)
@@ -3454,7 +3073,6 @@ instance HasTextEnvelope (SigningKey PaymentKey) where
 --
 -- This is a type level tag, used with other interfaces like 'Key'.
 --
-data PaymentExtendedKey
 
 instance HasTypeProxy PaymentExtendedKey where
     data AsType PaymentExtendedKey = AsPaymentExtendedKey
@@ -3580,8 +3198,6 @@ instance CastVerificationKeyRole PaymentExtendedKey PaymentKey where
 --
 -- Stake keys
 --
-
-data StakeKey
 
 instance HasTypeProxy StakeKey where
     data AsType StakeKey = AsStakeKey
@@ -3819,8 +3435,6 @@ instance CastVerificationKeyRole StakeExtendedKey StakeKey where
 -- Genesis keys
 --
 
-data GenesisKey
-
 instance HasTypeProxy GenesisKey where
     data AsType GenesisKey = AsGenesisKey
     proxyToAsType _ = AsGenesisKey
@@ -4037,8 +3651,6 @@ instance CastVerificationKeyRole GenesisExtendedKey GenesisKey where
 --
 -- Genesis delegate keys
 --
-
-data GenesisDelegateKey
 
 instance HasTypeProxy GenesisDelegateKey where
     data AsType GenesisDelegateKey = AsGenesisDelegateKey
@@ -4266,8 +3878,6 @@ instance CastVerificationKeyRole GenesisDelegateExtendedKey GenesisDelegateKey w
 -- Genesis UTxO keys
 --
 
-data GenesisUTxOKey
-
 instance HasTypeProxy GenesisUTxOKey where
     data AsType GenesisUTxOKey = AsGenesisUTxOKey
     proxyToAsType _ = AsGenesisUTxOKey
@@ -4391,8 +4001,6 @@ genesisUTxOPseudoTxIn nw (GenesisUTxOKeyHash kh) =
 --
 -- stake pool keys
 --
-
-data StakePoolKey
 
 instance HasTypeProxy StakePoolKey where
     data AsType StakePoolKey = AsStakePoolKey

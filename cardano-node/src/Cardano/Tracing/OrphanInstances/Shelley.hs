@@ -10,6 +10,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
@@ -47,7 +48,11 @@ import           Ouroboros.Consensus.Shelley.Protocol (TPraosCannotForge (..))
 import qualified Ouroboros.Consensus.Shelley.Protocol.HotKey as HotKey
 
 import qualified Cardano.Ledger.Crypto as Core
+import qualified Cardano.Ledger.Val as Core
 import qualified Cardano.Ledger.Core as Core
+import qualified Cardano.Ledger.Mary.Value as MA
+import qualified Cardano.Ledger.ShelleyMA.Timelocks as MA
+import qualified Cardano.Ledger.ShelleyMA.Rules.Utxo as MA
 
 -- TODO: this should be exposed via Cardano.Api
 import           Shelley.Spec.Ledger.API
@@ -102,8 +107,10 @@ instance ShelleyBasedEra era => ToObject (Header (ShelleyBlock era)) where
         , "blockNo" .= condense (blockNo b)
 --      , "delegate" .= condense (headerSignerVk h)
         ]
-instance (ShelleyBasedEra era, ToObject (PredicateFailure (UTXO era)))
-      => ToObject (ApplyTxError era) where
+instance ( ShelleyBasedEra era
+         , ToObject (PredicateFailure (UTXO era))
+         , ToObject (PredicateFailure (UTXOW era))
+         ) => ToObject (ApplyTxError era) where
   toObject verb (ApplyTxError predicateFailures) =
     HMS.unions $ map (toObject verb) predicateFailures
 
@@ -146,8 +153,10 @@ instance ToObject HotKey.KESEvolutionError where
       , "targetPeriod" .= targetPeriod
       ]
 
-instance (ShelleyBasedEra era, ToObject (PredicateFailure (UTXO era)))
-      => ToObject (ShelleyLedgerError era) where
+instance ( ShelleyBasedEra era
+         , ToObject (PredicateFailure (UTXO era))
+         , ToObject (PredicateFailure (UTXOW era))
+         ) => ToObject (ShelleyLedgerError era) where
   toObject verb (BBodyError (BlockTransitionError fs)) =
     mkObject [ "kind" .= String "BBodyError"
              , "failures" .= map (toObject verb) fs
@@ -209,8 +218,10 @@ instance Core.Crypto crypto => ToObject (ChainTransitionError crypto) where
              , "failures" .= map (toObject verb) fs
              ]
 
-instance (ShelleyBasedEra era, ToObject (PredicateFailure (UTXO era)))
-      => ToObject (ChainPredicateFailure era) where
+instance ( ShelleyBasedEra era
+         , ToObject (PredicateFailure (UTXO era))
+         , ToObject (PredicateFailure (UTXOW era))
+         ) => ToObject (ChainPredicateFailure era) where
   toObject _verb (HeaderSizeTooLargeCHAIN hdrSz maxHdrSz) =
     mkObject [ "kind" .= String "HeaderSizeTooLarge"
              , "headerSize" .= hdrSz
@@ -254,8 +265,10 @@ instance ToObject (PrtlSeqFailure crypto) where
              , "currentBlockHash" .= String (textShow currentHash)
              ]
 
-instance (ShelleyBasedEra era, ToObject (PredicateFailure (UTXO era)))
-      => ToObject (BbodyPredicateFailure era) where
+instance ( ShelleyBasedEra era
+         , ToObject (PredicateFailure (UTXO era))
+         , ToObject (PredicateFailure (UTXOW era))
+         ) => ToObject (BbodyPredicateFailure era) where
   toObject _verb (WrongBlockBodySizeBBODY actualBodySz claimedBodySz) =
     mkObject [ "kind" .= String "WrongBlockBodySizeBBODY"
              , "actualBlockBodySize" .= actualBodySz
@@ -269,13 +282,17 @@ instance (ShelleyBasedEra era, ToObject (PredicateFailure (UTXO era)))
   toObject verb (LedgersFailure f) = toObject verb f
 
 
-instance (ShelleyBasedEra era, ToObject (PredicateFailure (UTXO era)))
-      => ToObject (LedgersPredicateFailure era) where
+instance ( ShelleyBasedEra era
+         , ToObject (PredicateFailure (UTXO era))
+         , ToObject (PredicateFailure (UTXOW era))
+         ) => ToObject (LedgersPredicateFailure era) where
   toObject verb (LedgerFailure f) = toObject verb f
 
 
-instance (ShelleyBasedEra era, ToObject (PredicateFailure (UTXO era)))
-      => ToObject (LedgerPredicateFailure era) where
+instance ( ShelleyBasedEra era
+         , ToObject (PredicateFailure (UTXO era))
+         , ToObject (PredicateFailure (UTXOW era))
+         ) => ToObject (LedgerPredicateFailure era) where
   toObject verb (UtxowFailure f) = toObject verb f
   toObject verb (DelegsFailure f) = toObject verb f
 
@@ -320,10 +337,7 @@ instance (ShelleyBasedEra era, ToObject (PredicateFailure (UTXO era)))
     mkObject [ "kind" .= String "InvalidMetaData"
              ]
 
--- TODO the equality will need to be removed when Mary is switched to the real
--- Mary era instead of just a copy of Shelley. 'renderValueNotConservedErr' will
--- need to be changed accordingly.
-instance (ShelleyBasedEra era, Core.Value era ~ Coin)
+instance (ShelleyBasedEra era, ToJSON (Core.Value era))
       => ToObject (UtxoPredicateFailure era) where
   toObject _verb (BadInputsUTxO badInputs) =
     mkObject [ "kind" .= String "BadInputsUTxO"
@@ -360,7 +374,7 @@ instance (ShelleyBasedEra era, Core.Value era ~ Coin)
     mkObject [ "kind" .= String "ValueNotConservedUTxO"
              , "consumed" .= consumed
              , "produced" .= produced
-             , "error" .= renderValueNotConservedErr consumed produced
+             , "error" .= renderValueNotConservedErr (Proxy @era) consumed produced
              ]
   toObject verb (UpdateFailure f) = toObject verb f
 
@@ -375,16 +389,84 @@ instance (ShelleyBasedEra era, Core.Value era ~ Coin)
              , "addrs"   .= addrs
              ]
 
+instance ToJSON (MA.Value era) where
+  toJSON = panic "TODO @node team: implement it. Should this be defined in cardano-ledger-specs?"
+
+-- TODO @node team: does this make sense? Note that the object can be empty.
+instance ToJSON MA.ValidityInterval where
+  toJSON vi =
+    Aeson.object $
+        [ "validFrom" .= x | x <- mbfield (MA.validFrom vi) ]
+     ++ [ "validTo"   .= x | x <- mbfield (MA.validTo   vi) ]
+    where
+      mbfield SNothing  = []
+      mbfield (SJust x) = [x]
+
+instance (ShelleyBasedEra era, ToJSON (Core.Value era))
+      => ToObject (MA.UtxoPredicateFailure era) where
+  toObject _verb (MA.BadInputsUTxO badInputs) =
+    mkObject [ "kind" .= String "BadInputsUTxO"
+             , "badInputs" .= badInputs
+             , "error" .= renderBadInputsUTxOErr badInputs
+             ]
+  toObject _verb (MA.OutsideValidityIntervalUTxO validityInterval slot) =
+    mkObject [ "kind" .= String "ExpiredUTxO"
+             , "validityInterval" .= validityInterval
+             , "slot" .= slot ]
+  toObject _verb (MA.MaxTxSizeUTxO txsize maxtxsize) =
+    mkObject [ "kind" .= String "MaxTxSizeUTxO"
+             , "size" .= txsize
+             , "maxSize" .= maxtxsize ]
+  toObject _verb MA.InputSetEmptyUTxO =
+    mkObject [ "kind" .= String "InputSetEmptyUTxO" ]
+  toObject _verb (MA.FeeTooSmallUTxO minfee txfee) =
+    mkObject [ "kind" .= String "FeeTooSmallUTxO"
+             , "minimum" .= minfee
+             , "fee" .= txfee ]
+  toObject _verb (MA.ValueNotConservedUTxO consumed produced) =
+    mkObject [ "kind" .= String "ValueNotConservedUTxO"
+             , "consumed" .= consumed
+             , "produced" .= produced
+             , "error" .= renderValueNotConservedErr (Proxy @era) consumed produced
+             ]
+  toObject _verb (MA.WrongNetwork network addrs) =
+    mkObject [ "kind" .= String "WrongNetwork"
+             , "network" .= network
+             , "addrs"   .= addrs
+             ]
+  toObject _verb (MA.WrongNetworkWithdrawal network addrs) =
+    mkObject [ "kind" .= String "WrongNetworkWithdrawal"
+             , "network" .= network
+             , "addrs"   .= addrs
+             ]
+  -- TODO: Add the minimum allowed UTxO value to OutputTooSmallUTxO
+  toObject _verb (MA.OutputTooSmallUTxO badOutputs) =
+    mkObject [ "kind" .= String "OutputTooSmallUTxO"
+             , "outputs" .= badOutputs
+             , "error" .= String "The output is smaller than the allow minimum \
+                                 \UTxO value defined in the protocol parameters"
+             ]
+  toObject verb (MA.UpdateFailure f) = toObject verb f
+  toObject _verb (MA.OutputBootAddrAttrsTooBig badOutputs) =
+    mkObject [ "kind" .= String "OutputBootAddrAttrsTooBig"
+             , "outputs" .= badOutputs
+             , "error" .= String "The Byron address attributes are too big"
+             ]
+  toObject _verb MA.TriesToForgeADA =
+    mkObject [ "kind" .= String "TriesToForgeADA" ]
+
 renderBadInputsUTxOErr ::  Set (TxIn era) -> Value
 renderBadInputsUTxOErr txIns
   | Set.null txIns = String "The transaction contains no inputs."
   | otherwise = String "The transaction contains inputs that do not exist in the UTxO set."
 
-renderValueNotConservedErr :: Coin -> Coin -> Value
-renderValueNotConservedErr consumed produced
-  | consumed > produced = String "This transaction has consumed more Lovelace than it has produced."
-  | consumed < produced = String "This transaction has produced more Lovelace than it has consumed."
-  | otherwise = String "Impossible: Somehow this error has occurred in spite of the transaction being balanced."
+-- TODO @node team: does this make sense?
+renderValueNotConservedErr :: Core.Val (Core.Value era) => Proxy era -> Core.Value era -> Core.Value era -> Value
+renderValueNotConservedErr _ consumed produced
+  | Core.pointwise (>) consumed produced
+  = String "This transaction has consumed more Lovelace than it has produced."
+  | otherwise
+  = String "This transaction has produced more Lovelace than it has consumed."
 
 instance ToObject (PpupPredicateFailure era) where
   toObject _verb (NonGenesisUpdatePPUP proposalKeys genesisKeys) =

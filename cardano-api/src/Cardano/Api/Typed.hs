@@ -336,6 +336,8 @@ module Cardano.Api.Typed (
     Shelley.PParamsUpdate,
     Shelley.VerKeyVRF,
     StandardShelley,
+    StandardAllegra,
+    StandardMary,
     Shelley.emptyPParams,
     Shelley.truncateUnitInterval,
     emptyGenesisStaking,
@@ -466,7 +468,7 @@ import qualified Cardano.Chain.UTxO as Byron
 --
 -- Shelley imports
 --
-import           Ouroboros.Consensus.Shelley.Eras (StandardShelley)
+import           Ouroboros.Consensus.Shelley.Eras (StandardAllegra, StandardShelley, StandardMary)
 import           Ouroboros.Consensus.Shelley.Protocol.Crypto (StandardCrypto)
 
 import qualified Cardano.Ledger.Core as Shelley (Script)

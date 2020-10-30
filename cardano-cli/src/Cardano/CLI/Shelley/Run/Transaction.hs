@@ -25,6 +25,8 @@ import           Control.Monad.Trans.Except.Extra (firstExceptT, handleIOExceptT
 import qualified Cardano.Binary as CBOR
 
 import qualified Shelley.Spec.Ledger.PParams as Shelley
+import           Shelley.Spec.Ledger.Scripts ()
+import           Cardano.Ledger.ShelleyMA.TxBody ()
 
 import           Ouroboros.Consensus.Byron.Ledger (ByronBlock)
 import           Ouroboros.Consensus.Cardano.Block (EraMismatch (..), HardForkApplyTxErr (..))
@@ -55,6 +57,8 @@ data ShelleyTxCmdError
   | ShelleyTxCmdSocketEnvError !EnvSocketError
   | ShelleyTxCmdTxSubmitErrorByron !(ApplyTxErr ByronBlock)
   | ShelleyTxCmdTxSubmitErrorShelley !(ApplyTxErr (ShelleyBlock StandardShelley))
+  | ShelleyTxCmdTxSubmitErrorAllegra !(ApplyTxErr (ShelleyBlock StandardAllegra))
+  | ShelleyTxCmdTxSubmitErrorMary !(ApplyTxErr (ShelleyBlock StandardMary))
   | ShelleyTxCmdTxSubmitErrorEraMismatch !EraMismatch
   deriving Show
 
@@ -85,6 +89,10 @@ renderShelleyTxCmdError err =
     ShelleyTxCmdTxSubmitErrorByron res ->
       "Error while submitting tx: " <> Text.pack (show res)
     ShelleyTxCmdTxSubmitErrorShelley res ->
+      "Error while submitting tx: " <> Text.pack (show res)
+    ShelleyTxCmdTxSubmitErrorAllegra res ->
+      "Error while submitting tx: " <> Text.pack (show res)
+    ShelleyTxCmdTxSubmitErrorMary res ->
       "Error while submitting tx: " <> Text.pack (show res)
     ShelleyTxCmdTxSubmitErrorEraMismatch EraMismatch{ledgerEraName, otherEraName} ->
       "The era of the node and the tx do not match. " <>
@@ -244,9 +252,9 @@ runTxSubmit protocol network txFile = do
             TxSubmitFailureCardanoMode (ApplyTxErrShelley err) ->
               left (ShelleyTxCmdTxSubmitErrorShelley err)
             TxSubmitFailureCardanoMode (ApplyTxErrAllegra err) ->
-              left (ShelleyTxCmdTxSubmitErrorShelley err)
+              left (ShelleyTxCmdTxSubmitErrorAllegra err)
             TxSubmitFailureCardanoMode (ApplyTxErrMary err) ->
-              left (ShelleyTxCmdTxSubmitErrorShelley err)
+              left (ShelleyTxCmdTxSubmitErrorMary err)
             TxSubmitFailureCardanoMode (ApplyTxErrWrongEra mismatch) ->
               left (ShelleyTxCmdTxSubmitErrorEraMismatch mismatch)
 
